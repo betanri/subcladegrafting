@@ -12,7 +12,7 @@ Given a set of backbone trees and a set of subclade trees that share two "key ta
 4. Removes the placeholder tip from the final tree
 5. Repeats for every backbone x subclade combination
 
-This is useful for integrating clade-specific phylogenies (e.g., from targeted-capture or UCE datasets) into a broader reference tree (e.g., a time-calibrated supermatrix).
+This is useful for integrating clade-specific phylogenies into a set of backbone trees.
 
 ## Requirements
 
