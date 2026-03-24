@@ -52,12 +52,15 @@ library(phytools)  # fastMRCA, extract.clade, branching.times, etc.
 # Paths to your tree files. Each file can contain one or many trees.
 # Accepted formats: NEXUS (.nex, .nex.tre) or Newick (.tre, .nwk).
 
-BACKBONE_FILE <- "backbone_trees.nex"      # <-- your backbone tree file
-SUBCLADE_FILE <- "subclade_trees.nex"       # <-- your subclade tree file
+# NOTE: These use if(!exists(...)) so you can set them BEFORE source()-ing this
+# script (e.g., from a wrapper like run_example.r) and they won't be overwritten.
+
+if (!exists("BACKBONE_FILE")) BACKBONE_FILE <- "backbone_trees.nex"      # <-- your backbone tree file
+if (!exists("SUBCLADE_FILE")) SUBCLADE_FILE <- "subclade_trees.nex"       # <-- your subclade tree file
 
 # -- 2. Output file -----------------------------------------------------------
 
-OUTPUT_FILE <- "Grafted_Trees.nex"          # <-- name for output file (NEXUS)
+if (!exists("OUTPUT_FILE")) OUTPUT_FILE <- "Grafted_Trees.nex"          # <-- name for output file (NEXUS)
 
 # -- 3. Key taxa --------------------------------------------------------------
 # Two taxa that are present in BOTH the backbone and the subclade trees.
@@ -69,16 +72,16 @@ OUTPUT_FILE <- "Grafted_Trees.nex"          # <-- name for output file (NEXUS)
 # Example: if grafting a family-level phylogeny into an order-level backbone,
 # pick two species from that family that appear in both trees.
 
-Key.taxon1 <- "Genus_species1"             # <-- REPLACE with your taxon
-Key.taxon2 <- "Genus_species2"             # <-- REPLACE with your taxon
+if (!exists("Key.taxon1")) Key.taxon1 <- "Genus_species1"             # <-- REPLACE with your taxon
+if (!exists("Key.taxon2")) Key.taxon2 <- "Genus_species2"             # <-- REPLACE with your taxon
 
 # -- 4. Optional: rescale subclade branch lengths? ----------------------------
 # If your subclade branch lengths are on a different scale than the backbone
 # (e.g., substitutions x100 vs. time-calibrated), set RESCALE to TRUE and
 # choose a divisor. Otherwise leave as FALSE.
 
-RESCALE_SUBCLADE <- FALSE
-RESCALE_DIVISOR  <- 100                    # branch lengths will be divided by this
+if (!exists("RESCALE_SUBCLADE")) RESCALE_SUBCLADE <- FALSE
+if (!exists("RESCALE_DIVISOR"))  RESCALE_DIVISOR  <- 100                    # branch lengths will be divided by this
 
 
 # =============================================================================
@@ -148,7 +151,11 @@ rescale_branch_lengths <- function(trees, divisor = 100) {
 #
 # For every subclade tree and every backbone tree, this function:
 #   1. Extracts the subclade of interest using the MRCA of Key.taxon1 + Key.taxon2.
-#   2. Drops Key.taxon2 from the backbone to leave one attachment point.
+#   2. Finds the MRCA of those two key taxa in the backbone and drops ALL
+#      descendant tips EXCEPT Key.taxon1. This collapses the clade down to a
+#      single placeholder tip whose pendant edge stretches back to the MRCA node,
+#      giving bind.tree() enough branch length to place the subclade root at
+#      the correct depth.
 #   3. Attaches the extracted subclade at Key.taxon1 using bind.tree().
 #   4. Removes the placeholder tip (Key.taxon1) from the final tree.
 #
@@ -218,9 +225,14 @@ graft_all_combinations <- function(Backbone.trees, Subclade.trees,
         next
       }
 
-      # Drop Key.taxon2 from backbone — only Key.taxon1 remains as the
-      # attachment point for the subclade
-      pruned_bb <- drop.tip(bb_tree, Key.taxon2)
+      # --- Critical step: prune ALL subclade members from backbone except
+      #     Key.taxon1. This ensures Key.taxon1's pendant edge extends all
+      #     the way back to the MRCA node, so bind.tree() has enough branch
+      #     length for position = crown_age. ---
+      mrca_bb       <- fastMRCA(bb_tree, Key.taxon1, Key.taxon2)
+      clade_tips_bb <- extract.clade(bb_tree, mrca_bb)$tip.label
+      tips_to_drop  <- setdiff(clade_tips_bb, Key.taxon1)
+      pruned_bb     <- drop.tip(bb_tree, tips_to_drop)
 
       # Graft!
       result <- tryCatch({
@@ -284,11 +296,26 @@ cat("Step 4: Grafting all backbone x subclade combinations...\n")
 all_grafted <- graft_all_combinations(Backbone.trees, Subclade.trees,
                                       Key.taxon1, Key.taxon2)
 
-# Step 5: Save results
+# Step 5: Force ultrametricity
+# bind.tree can introduce tiny floating-point deviations in root-to-tip
+# distances (typically < 1e-5). force.ultrametric() corrects these so
+# downstream analyses (e.g., PGLS, diversification) work without errors.
+cat("Step 5: Enforcing ultrametricity (correcting floating-point noise)...\n")
+all_grafted <- lapply(all_grafted, function(tr) {
+  if (!is.ultrametric(tr)) {
+    invisible(capture.output(tr <- force.ultrametric(tr, method = "extend")))
+  }
+  return(tr)
+})
+class(all_grafted) <- "multiPhylo"
+cat(sprintf("  All %d trees are now ultrametric: %s\n",
+            length(all_grafted),
+            all(sapply(all_grafted, is.ultrametric))))
+
+# Step 6: Save results
 if (length(all_grafted) > 0) {
-  cat(sprintf("Step 5: Writing %d grafted trees to '%s'...\n",
+  cat(sprintf("Step 6: Writing %d grafted trees to '%s'...\n",
               length(all_grafted), OUTPUT_FILE))
-  class(all_grafted) <- "multiPhylo"
   write.nexus(all_grafted, file = OUTPUT_FILE)
   cat(sprintf("\nDone! %d grafted trees saved to: %s\n", length(all_grafted), OUTPUT_FILE))
 } else {

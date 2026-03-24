@@ -29,6 +29,18 @@ RESCALE_SUBCLADE <- FALSE
 
 source("../GraftSubcladesIntoBackboneTrees.r")
 
+# ---- Ultrametricity verification -------------------------------------------
+
+cat("\n========== ULTRAMETRICITY CHECK ==========\n")
+for (i in 1:min(5, length(all_grafted))) {
+  tree <- all_grafted[[i]]
+  cat(sprintf("Tree %d: ultrametric=%s  Ntip=%d\n",
+              i, is.ultrametric(tree), Ntip(tree)))
+}
+cat(sprintf("All %d trees ultrametric: %s\n",
+            length(all_grafted),
+            all(sapply(all_grafted, is.ultrametric))))
+
 # ---- Quick sanity check: plot the first grafted tree -----------------------
 
 if (length(all_grafted) > 0) {
