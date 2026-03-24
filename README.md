@@ -82,9 +82,3 @@ If the subclade branch lengths are on a different scale than the backbone (e.g.,
 RESCALE_SUBCLADE <- TRUE
 RESCALE_DIVISOR  <- 100   # branch lengths divided by this value
 ```
-
-## Citation
-
-If you use this script, please cite:
-
-Betancur-R., R. et al. (in prep). Phylogenetic comparative methods for Australian and New Guinean freshwater fishes.
