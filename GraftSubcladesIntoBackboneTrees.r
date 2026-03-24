@@ -6,8 +6,7 @@
 # Purpose: Graft one or more densely-sampled subclade phylogenies into one or
 #          more backbone (spine) trees, producing every valid combination of
 #          grafted trees. Useful for integrating clade-specific phylogenies
-#          (e.g., from targeted sequencing) into a larger reference tree
-#          (e.g., a time-calibrated supermatrix or supertree).
+#          into a set of backbone trees.
 #
 # HOW IT WORKS (the short version)
 # ---------------------------------
