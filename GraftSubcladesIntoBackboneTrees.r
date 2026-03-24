@@ -1,0 +1,341 @@
+# =============================================================================
+# GraftSubcladesIntoBackboneTrees.r
+#
+# Author:  Ricardo Betancur (adapted for general use)
+# Date:    March 2026
+# Purpose: Graft one or more densely-sampled subclade phylogenies into one or
+#          more backbone (spine) trees, producing every valid combination of
+#          grafted trees. Useful for integrating clade-specific phylogenies
+#          (e.g., from targeted sequencing) into a larger reference tree
+#          (e.g., a time-calibrated supermatrix or supertree).
+#
+# HOW IT WORKS (the short version)
+# ---------------------------------
+# 1. You provide backbone tree(s) and subclade tree(s) in NEXUS or Newick format.
+# 2. You specify two "key taxa" — tips that appear in BOTH the backbone and the
+#    subclade. These anchor the graft:
+#      - Key.taxon1 marks WHERE on the backbone the subclade will attach.
+#      - Key.taxon2 (together with Key.taxon1) defines the MRCA in the subclade
+#        so we can extract the clade of interest.
+# 3. The script:
+#      a. Finds the MRCA of Key.taxon1 + Key.taxon2 in the subclade tree and
+#         extracts that clade.
+#      b. Drops Key.taxon2 from the backbone (so only Key.taxon1 remains as the
+#         attachment point).
+#      c. Uses bind.tree() to attach the extracted subclade at Key.taxon1's
+#         position, placing it at the crown age of the subclade.
+#      d. Removes Key.taxon1 (the placeholder tip) from the grafted result.
+# 4. This is repeated for every backbone x subclade combination.
+# 5. All grafted trees are saved to a single output file.
+#
+# DEPENDENCIES
+# ------------
+# install.packages("phytools")  # if not already installed
+# install.packages("ape")       # if not already installed
+#
+# =============================================================================
+
+
+# ---- Load required packages -------------------------------------------------
+
+library(ape)       # core phylogenetics: read/write trees, drop.tip, bind.tree
+library(phytools)  # fastMRCA, extract.clade, branching.times, etc.
+
+
+# =============================================================================
+#                        USER CONFIGURATION SECTION
+#
+#  Edit the values below to match YOUR files and taxa, then source this script.
+# =============================================================================
+
+# -- 1. Input files -----------------------------------------------------------
+# Paths to your tree files. Each file can contain one or many trees.
+# Accepted formats: NEXUS (.nex, .nex.tre) or Newick (.tre, .nwk).
+
+BACKBONE_FILE <- "backbone_trees.nex"      # <-- your backbone tree file
+SUBCLADE_FILE <- "subclade_trees.nex"       # <-- your subclade tree file
+
+# -- 2. Output file -----------------------------------------------------------
+
+OUTPUT_FILE <- "Grafted_Trees.nex"          # <-- name for output file (NEXUS)
+
+# -- 3. Key taxa --------------------------------------------------------------
+# Two taxa that are present in BOTH the backbone and the subclade trees.
+# They define the grafting point:
+#   Key.taxon1 = the tip in the backbone where the subclade will be attached.
+#   Key.taxon2 = used together with Key.taxon1 to find the MRCA in the subclade.
+#                Also dropped from the backbone before grafting.
+#
+# Example: if grafting a family-level phylogeny into an order-level backbone,
+# pick two species from that family that appear in both trees.
+
+Key.taxon1 <- "Genus_species1"             # <-- REPLACE with your taxon
+Key.taxon2 <- "Genus_species2"             # <-- REPLACE with your taxon
+
+# -- 4. Optional: rescale subclade branch lengths? ----------------------------
+# If your subclade branch lengths are on a different scale than the backbone
+# (e.g., substitutions x100 vs. time-calibrated), set RESCALE to TRUE and
+# choose a divisor. Otherwise leave as FALSE.
+
+RESCALE_SUBCLADE <- FALSE
+RESCALE_DIVISOR  <- 100                    # branch lengths will be divided by this
+
+
+# =============================================================================
+#                           FUNCTION DEFINITIONS
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# read_trees: Load trees from a file, auto-detecting NEXUS vs. Newick format.
+#
+# Arguments:
+#   filepath  Path to tree file (.nex, .nex.tre, .tre, .nwk)
+#
+# Returns:
+#   A multiPhylo object (list of trees), even if the file has just one tree.
+# -----------------------------------------------------------------------------
+read_trees <- function(filepath) {
+  if (!file.exists(filepath)) {
+    stop(paste("File not found:", filepath))
+  }
+
+  # Peek at first line to decide format
+  first_line <- toupper(trimws(readLines(filepath, n = 1)))
+
+  if (grepl("^#NEXUS", first_line)) {
+    trees <- read.nexus(filepath)
+  } else {
+    trees <- read.tree(filepath)
+  }
+
+  # Ensure multiPhylo even if single tree
+  if (inherits(trees, "phylo")) {
+    trees <- c(trees)                    # converts phylo -> multiPhylo
+    class(trees) <- "multiPhylo"
+    names(trees) <- tools::file_path_sans_ext(basename(filepath))
+  }
+
+  cat(sprintf("  Loaded %d tree(s) from '%s'\n", length(trees), filepath))
+  return(trees)
+}
+
+
+# -----------------------------------------------------------------------------
+# rescale_branch_lengths: Divide all branch lengths in a set of trees by a
+#   constant. Useful when subclade trees are in substitutions (x100) and the
+#   backbone is time-calibrated.
+#
+# Arguments:
+#   trees    multiPhylo object
+#   divisor  number to divide branch lengths by (default = 100)
+#
+# Returns:
+#   A rescaled multiPhylo object.
+# -----------------------------------------------------------------------------
+rescale_branch_lengths <- function(trees, divisor = 100) {
+  rescaled <- lapply(trees, function(tree) {
+    tree$edge.length <- tree$edge.length / divisor
+    return(tree)
+  })
+  class(rescaled) <- "multiPhylo"
+  names(rescaled) <- names(trees)
+  return(rescaled)
+}
+
+
+# -----------------------------------------------------------------------------
+# graft_all_combinations: The core grafting engine.
+#
+# For every subclade tree and every backbone tree, this function:
+#   1. Extracts the subclade of interest using the MRCA of Key.taxon1 + Key.taxon2.
+#   2. Drops Key.taxon2 from the backbone to leave one attachment point.
+#   3. Attaches the extracted subclade at Key.taxon1 using bind.tree().
+#   4. Removes the placeholder tip (Key.taxon1) from the final tree.
+#
+# Arguments:
+#   Backbone.trees   multiPhylo: one or more backbone trees
+#   Subclade.trees   multiPhylo: one or more subclade trees
+#   Key.taxon1       character: tip present in both (attachment point)
+#   Key.taxon2       character: tip present in both (defines MRCA in subclade;
+#                    removed from backbone before grafting)
+#
+# Returns:
+#   A named list of grafted phylo objects. Names follow the pattern:
+#   "BackboneName_SubcladeName" so you can trace which inputs produced each tree.
+# -----------------------------------------------------------------------------
+graft_all_combinations <- function(Backbone.trees, Subclade.trees,
+                                   Key.taxon1, Key.taxon2) {
+
+  grafted_trees <- list()
+
+  # -- Inner helper: performs the actual bind.tree + cleanup ------------------
+  graft_one <- function(Backbone, Subtree_clade, Keynode_name) {
+    # Crown age of the subclade = the deepest branching time (root of subclade).
+    # This tells bind.tree how far back along the backbone branch to place the
+    # attachment, so the subclade root sits at the right depth.
+    crown_age <- branching.times(Subtree_clade)[[1]]
+
+    # Find the node number of the key taxon in the (pruned) backbone
+    keynode_idx <- which(Backbone$tip.label == Keynode_name)
+
+    # Attach the subclade at that tip position
+    grafted <- bind.tree(Backbone, Subtree_clade,
+                         where = keynode_idx,
+                         position = crown_age,
+                         interactive = FALSE)
+
+    # Remove the placeholder tip — its role is done
+    grafted <- drop.tip(grafted, Keynode_name)
+
+    return(grafted)
+  }
+
+  # -- Loop over every subclade x backbone combination -----------------------
+  for (s in seq_along(Subclade.trees)) {
+    sub_tree   <- Subclade.trees[[s]]
+    sub_label  <- names(Subclade.trees)[s]
+    if (is.null(sub_label)) sub_label <- paste0("Subclade_", s)
+
+    # Validate that key taxa exist in this subclade tree
+    if (!all(c(Key.taxon1, Key.taxon2) %in% sub_tree$tip.label)) {
+      warning(sprintf("Skipping subclade '%s': key taxa not both present.", sub_label))
+      next
+    }
+
+    # Find the MRCA of the two key taxa in the subclade tree, then extract
+    # that clade. This is the piece we will graft into the backbone.
+    mrca_node     <- fastMRCA(sub_tree, Key.taxon1, Key.taxon2)
+    subclade_part <- extract.clade(sub_tree, mrca_node)
+
+    for (b in seq_along(Backbone.trees)) {
+      bb_tree  <- Backbone.trees[[b]]
+      bb_label <- names(Backbone.trees)[b]
+      if (is.null(bb_label)) bb_label <- paste0("Backbone_", b)
+
+      # Validate that key taxa exist in this backbone tree
+      if (!all(c(Key.taxon1, Key.taxon2) %in% bb_tree$tip.label)) {
+        warning(sprintf("Skipping backbone '%s': key taxa not both present.", bb_label))
+        next
+      }
+
+      # Drop Key.taxon2 from backbone — only Key.taxon1 remains as the
+      # attachment point for the subclade
+      pruned_bb <- drop.tip(bb_tree, Key.taxon2)
+
+      # Graft!
+      result <- tryCatch({
+        graft_one(pruned_bb, subclade_part, Key.taxon1)
+      }, error = function(e) {
+        warning(sprintf("Grafting failed for '%s' x '%s': %s",
+                        bb_label, sub_label, e$message))
+        return(NULL)
+      })
+
+      if (!is.null(result)) {
+        combo_name <- paste0(bb_label, "_", sub_label)
+        grafted_trees[[combo_name]] <- result
+      }
+    }
+  }
+
+  cat(sprintf("  Produced %d grafted tree(s).\n", length(grafted_trees)))
+  return(grafted_trees)
+}
+
+
+# =============================================================================
+#                              MAIN WORKFLOW
+# =============================================================================
+
+cat("\n========== Grafting Subclades into Backbone Trees ==========\n\n")
+
+# Step 1: Load trees
+cat("Step 1: Loading trees...\n")
+Backbone.trees <- read_trees(BACKBONE_FILE)
+Subclade.trees <- read_trees(SUBCLADE_FILE)
+
+# Step 2: (Optional) Rescale subclade branch lengths
+if (RESCALE_SUBCLADE) {
+  cat(sprintf("Step 2: Rescaling subclade branch lengths (dividing by %d)...\n",
+              RESCALE_DIVISOR))
+  Subclade.trees <- rescale_branch_lengths(Subclade.trees, RESCALE_DIVISOR)
+} else {
+  cat("Step 2: Skipping rescaling (RESCALE_SUBCLADE = FALSE).\n")
+}
+
+# Step 3: Validate key taxa are present
+cat("Step 3: Checking key taxa...\n")
+# Quick check on the first tree of each set
+bb_tips  <- Backbone.trees[[1]]$tip.label
+sub_tips <- Subclade.trees[[1]]$tip.label
+
+if (!(Key.taxon1 %in% bb_tips))
+  stop(paste("Key.taxon1 not found in backbone:", Key.taxon1))
+if (!(Key.taxon2 %in% bb_tips))
+  stop(paste("Key.taxon2 not found in backbone:", Key.taxon2))
+if (!(Key.taxon1 %in% sub_tips))
+  stop(paste("Key.taxon1 not found in subclade:", Key.taxon1))
+if (!(Key.taxon2 %in% sub_tips))
+  stop(paste("Key.taxon2 not found in subclade:", Key.taxon2))
+cat("  Key taxa verified in both tree sets.\n")
+
+# Step 4: Graft all combinations
+cat("Step 4: Grafting all backbone x subclade combinations...\n")
+all_grafted <- graft_all_combinations(Backbone.trees, Subclade.trees,
+                                      Key.taxon1, Key.taxon2)
+
+# Step 5: Save results
+if (length(all_grafted) > 0) {
+  cat(sprintf("Step 5: Writing %d grafted trees to '%s'...\n",
+              length(all_grafted), OUTPUT_FILE))
+  class(all_grafted) <- "multiPhylo"
+  write.nexus(all_grafted, file = OUTPUT_FILE)
+  cat(sprintf("\nDone! %d grafted trees saved to: %s\n", length(all_grafted), OUTPUT_FILE))
+} else {
+  cat("\nNo trees were successfully grafted. Check warnings above.\n")
+}
+
+
+# =============================================================================
+#                     QUICK VISUAL CHECK (optional)
+# =============================================================================
+# Uncomment the lines below to plot the first grafted tree as a sanity check.
+#
+# if (length(all_grafted) > 0) {
+#   plot(all_grafted[[1]], cex = 0.4, no.margin = TRUE)
+#   title(main = names(all_grafted)[1], cex.main = 0.8)
+# }
+
+
+# =============================================================================
+#                          TIPS & TROUBLESHOOTING
+# =============================================================================
+#
+# Q: How do I pick Key.taxon1 and Key.taxon2?
+# A: They must be tips present in BOTH the backbone and the subclade tree.
+#    Ideally, they span the root of the subclade you want to graft — i.e., they
+#    are the two most distantly-related taxa in the subclade that also appear in
+#    the backbone. Their MRCA in the subclade defines which part gets extracted.
+#
+# Q: My subclade tree contains outgroups I don't want grafted.
+# A: That's fine! The script uses extract.clade() on the MRCA of the two key
+#    taxa, so only the ingroup (defined by those taxa) gets grafted. Anything
+#    outside the MRCA is ignored.
+#
+# Q: What if I have multiple subclades to graft sequentially?
+# A: Run this script once for each subclade. After the first graft, use the
+#    OUTPUT_FILE as the new BACKBONE_FILE for the next round. Example:
+#
+#      Round 1: Backbone.nex + Spikefishes.nex  -> Grafted_round1.nex
+#      Round 2: Grafted_round1.nex + OtherClade.nex -> Grafted_round2.nex
+#
+# Q: What if branch lengths don't match (e.g., substitutions vs. time)?
+# A: Set RESCALE_SUBCLADE <- TRUE and adjust RESCALE_DIVISOR so the subclade
+#    branch lengths are on the same scale as the backbone.
+#
+# Q: I get "Key taxa not both present" warnings.
+# A: Double-check the exact spelling of your key taxa (tip labels are
+#    case-sensitive and often use underscores instead of spaces).
+#    Run: Backbone.trees[[1]]$tip.label  to see all tip names.
+#
+# =============================================================================

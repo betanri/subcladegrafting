@@ -1,0 +1,11 @@
+# R session files
+.Rhistory
+.RData
+.Rproj.user/
+
+# Output files
+*Grafted_Trees*.nex
+*Grafted_Trees*.tre
+
+# macOS
+.DS_Store
