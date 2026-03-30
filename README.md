@@ -8,11 +8,13 @@ Given a set of backbone trees and a set of subclade trees that share two "key ta
 
 1. Finds the MRCA of the two key taxa in each subclade tree and extracts that clade
 2. Removes one key taxon from the backbone, leaving the other as the attachment point
-3. Attaches the extracted subclade at the remaining key taxon using `bind.tree()`, placing the junction at the subclade's crown age
+3. Attaches the extracted subclade at the remaining key taxon using `bind.tree()`, placing the junction at the subclade's root depth
 4. Removes the placeholder tip from the final tree
 5. Repeats for every backbone x subclade combination
 
 This is useful for integrating clade-specific phylogenies into a set of backbone trees.
+
+Works with both **ultrametric** and **non-ultrametric (tip-dated)** trees.
 
 ## Requirements
 
@@ -41,16 +43,25 @@ source("GraftSubcladesIntoBackboneTrees.r")
 
 Output is written as a NEXUS file containing all grafted trees.
 
-## Example
+## Examples
 
-The `example/` directory includes backbone and subclade trees (Liparidae snailfishes within a percomorph backbone) with a pre-configured runner:
+### Ultrametric trees (`example/`)
+
+Backbone and subclade trees (Liparidae snailfishes within a percomorph backbone), both ultrametric. Grafts 10 subclade trees into 10 backbone trees, producing 100 grafted trees.
 
 ```r
 setwd("example")
 source("run_example.r")
 ```
 
-This grafts 10 subclade trees into 10 backbone trees, producing 100 grafted trees.
+### Tip-dated (non-ultrametric) trees (`example_tipdated/`)
+
+A single Tetraodontiformes backbone (246 tips) and a single Triacanthodidae subclade (26 tips), both tip-dated with fossil taxa at different time points. Trees are intentionally non-ultrametric.
+
+```r
+setwd("example_tipdated")
+source("run_example_tipdated.r")
+```
 
 ## Choosing key taxa
 
@@ -60,9 +71,9 @@ To see shared tips between your trees:
 
 ```r
 library(ape)
-bb  <- read.nexus("backbone.nex")
-sub <- read.nexus("subclade.nex")
-intersect(bb[[1]]$tip.label, sub[[1]]$tip.label)
+bb  <- read.tree("backbone.nwk")
+sub <- read.tree("subclade.nwk")
+intersect(bb$tip.label, sub$tip.label)
 ```
 
 ## Grafting multiple subclades sequentially

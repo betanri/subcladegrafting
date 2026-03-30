@@ -38,7 +38,7 @@
 # ---- Load required packages -------------------------------------------------
 
 library(ape)       # core phylogenetics: read/write trees, drop.tip, bind.tree
-library(phytools)  # fastMRCA, extract.clade, branching.times, etc.
+library(phytools)  # fastMRCA, extract.clade, node.depth.edgelength, etc.
 
 
 # =============================================================================
@@ -176,29 +176,53 @@ graft_all_combinations <- function(Backbone.trees, Subclade.trees,
 
   # -- Inner helper: performs the actual bind.tree + cleanup ------------------
   graft_one <- function(Backbone, Subtree_clade, Keynode_name) {
-    # Root depth of the subclade: how far the root is from its deepest tip.
-    # We use node.depth.edgelength() which works for BOTH ultrametric and
-    # non-ultrametric (tip-dated) trees, unlike branching.times() which
-    # requires strict ultrametricity.
-    node_depths   <- node.depth.edgelength(Subtree_clade)
-    root_node     <- length(Subtree_clade$tip.label) + 1
-    root_depth    <- max(node_depths) - node_depths[root_node]
+    # --- Calculate the correct graft position ---
+    #
+    # The position parameter in bind.tree() is measured FROM the key taxon's
+    # tip going rootward along its pendant edge. It determines where the
+    # subclade root will be placed.
+    #
+    # For tip-dated trees, Key.taxon1 may be a fossil (not at the present).
+    # The correct position must ensure that EXTANT tips in the grafted
+    # subclade align at the present (t = 0) with extant tips in the backbone.
+    #
+    # Formula:
+    #   position = subclade_root_age - key_taxon_age_in_backbone
+    #
+    # Where:
+    #   subclade_root_age     = max root-to-tip distance in the subclade
+    #                           (= age of subclade root from the present)
+    #   key_taxon_age_in_backbone = tree_height - depth_of_key_taxon
+    #                           (= how far the key taxon is from the present)
+    #
+    # For ultrametric trees this simplifies to the crown age, since all tips
+    # (including Key.taxon1) are at the present (age = 0).
 
-    # Find the node number of the key taxon in the (pruned) backbone
-    keynode_idx <- which(Backbone$tip.label == Keynode_name)
+    # Subclade root age (from the present = from extant tips)
+    sub_depths        <- node.depth.edgelength(Subtree_clade)
+    subclade_root_age <- max(sub_depths)  # root is at depth 0, extant tips at max
 
-    # Get the branch length leading to the key taxon in the backbone.
-    # If the subclade root depth exceeds this branch length, bind.tree()
-    # will fail. In that case, cap position at the branch length (i.e.,
-    # attach at the parent node). This can happen when subclade and
-    # backbone divergence-time estimates differ.
-    edge_row    <- which(Backbone$edge[, 2] == keynode_idx)
-    branch_len  <- Backbone$edge.length[edge_row]
-    graft_pos   <- min(root_depth, branch_len)
+    # Key taxon age in the backbone (how old is this tip?)
+    bb_depths         <- node.depth.edgelength(Backbone)
+    bb_height         <- max(bb_depths)
+    keynode_idx       <- which(Backbone$tip.label == Keynode_name)
+    key_age_bb        <- bb_height - bb_depths[keynode_idx]
 
-    if (root_depth > branch_len) {
-      cat(sprintf("    Note: subclade root depth (%.2f) > branch length (%.2f); capping position.\n",
-                  root_depth, branch_len))
+    # Position from the key taxon tip going rootward
+    graft_pos <- subclade_root_age - key_age_bb
+
+    # Safety check: position must be positive and fit within the branch
+    edge_row   <- which(Backbone$edge[, 2] == keynode_idx)
+    branch_len <- Backbone$edge.length[edge_row]
+
+    if (graft_pos <= 0) {
+      warning(sprintf("Subclade root age (%.2f) <= key taxon age in backbone (%.2f). Using small positive position.",
+                      subclade_root_age, key_age_bb))
+      graft_pos <- branch_len * 0.01
+    } else if (graft_pos > branch_len) {
+      cat(sprintf("    Note: needed position (%.2f) > branch length (%.2f); capping.\n",
+                  graft_pos, branch_len))
+      graft_pos <- branch_len
     }
 
     # Attach the subclade at that tip position
