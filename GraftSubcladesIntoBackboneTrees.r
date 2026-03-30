@@ -176,18 +176,35 @@ graft_all_combinations <- function(Backbone.trees, Subclade.trees,
 
   # -- Inner helper: performs the actual bind.tree + cleanup ------------------
   graft_one <- function(Backbone, Subtree_clade, Keynode_name) {
-    # Crown age of the subclade = the deepest branching time (root of subclade).
-    # This tells bind.tree how far back along the backbone branch to place the
-    # attachment, so the subclade root sits at the right depth.
-    crown_age <- branching.times(Subtree_clade)[[1]]
+    # Root depth of the subclade: how far the root is from its deepest tip.
+    # We use node.depth.edgelength() which works for BOTH ultrametric and
+    # non-ultrametric (tip-dated) trees, unlike branching.times() which
+    # requires strict ultrametricity.
+    node_depths   <- node.depth.edgelength(Subtree_clade)
+    root_node     <- length(Subtree_clade$tip.label) + 1
+    root_depth    <- max(node_depths) - node_depths[root_node]
 
     # Find the node number of the key taxon in the (pruned) backbone
     keynode_idx <- which(Backbone$tip.label == Keynode_name)
 
+    # Get the branch length leading to the key taxon in the backbone.
+    # If the subclade root depth exceeds this branch length, bind.tree()
+    # will fail. In that case, cap position at the branch length (i.e.,
+    # attach at the parent node). This can happen when subclade and
+    # backbone divergence-time estimates differ.
+    edge_row    <- which(Backbone$edge[, 2] == keynode_idx)
+    branch_len  <- Backbone$edge.length[edge_row]
+    graft_pos   <- min(root_depth, branch_len)
+
+    if (root_depth > branch_len) {
+      cat(sprintf("    Note: subclade root depth (%.2f) > branch length (%.2f); capping position.\n",
+                  root_depth, branch_len))
+    }
+
     # Attach the subclade at that tip position
     grafted <- bind.tree(Backbone, Subtree_clade,
                          where = keynode_idx,
-                         position = crown_age,
+                         position = graft_pos,
                          interactive = FALSE)
 
     # Remove the placeholder tip — its role is done
@@ -295,25 +312,9 @@ cat("Step 4: Grafting all backbone x subclade combinations...\n")
 all_grafted <- graft_all_combinations(Backbone.trees, Subclade.trees,
                                       Key.taxon1, Key.taxon2)
 
-# Step 5: Force ultrametricity
-# bind.tree can introduce tiny floating-point deviations in root-to-tip
-# distances (typically < 1e-5). force.ultrametric() corrects these so
-# downstream analyses (e.g., PGLS, diversification) work without errors.
-cat("Step 5: Enforcing ultrametricity (correcting floating-point noise)...\n")
-all_grafted <- lapply(all_grafted, function(tr) {
-  if (!is.ultrametric(tr)) {
-    invisible(capture.output(tr <- force.ultrametric(tr, method = "extend")))
-  }
-  return(tr)
-})
-class(all_grafted) <- "multiPhylo"
-cat(sprintf("  All %d trees are now ultrametric: %s\n",
-            length(all_grafted),
-            all(sapply(all_grafted, is.ultrametric))))
-
-# Step 6: Save results
+# Step 5: Save results
 if (length(all_grafted) > 0) {
-  cat(sprintf("Step 6: Writing %d grafted trees to '%s'...\n",
+  cat(sprintf("Step 5: Writing %d grafted trees to '%s'...\n",
               length(all_grafted), OUTPUT_FILE))
   write.nexus(all_grafted, file = OUTPUT_FILE)
   cat(sprintf("\nDone! %d grafted trees saved to: %s\n", length(all_grafted), OUTPUT_FILE))
